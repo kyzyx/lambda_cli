@@ -487,7 +487,12 @@ def parse_env_vars(env_list: List[str]) -> Dict[str, str]:
             ) from e
     return env_vars
 
-def connect(name, sync_dir, remote_dir, env_vars=None):
+def connect(name, sync_dir, remote_dir, env_vars=None, do_sync=True):
+    if not do_sync:
+        ssh_cmd = ["ssh", name]
+        subprocess.run(ssh_cmd)
+        return
+
     click.echo("Performing initial file sync...")
     sync_directory(sync_dir, name, remote_dir)
     
@@ -527,7 +532,8 @@ def cli():
 @click.option('--env', '-e', multiple=True, help='Environment variables in KEY=VALUE format')
 @click.option('--env-file', type=click.Path(exists=True),
               help='File containing environment variables (one KEY=VALUE per line)')
-def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_file):
+@click.option('--no-sync', is_flag=True, help="Don't sync any directory")
+def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_file, no_sync):
     """Launch a new instance, configure SSH access, sync files, and connect"""
     if not api_key:
         click.echo("Please set LAMBDA_API_KEY environment variable or provide --api-key")
@@ -572,8 +578,9 @@ def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_
     click.echo("Waiting for SSH to be ready...")
     wait_for_ssh(name)
     
-    click.echo("Creating remote directory...")
-    subprocess.run(["ssh", name, f"mkdir -p {remote_dir}"], check=True)
+    if not no_sync:
+        click.echo("Creating remote directory...")
+        subprocess.run(["ssh", name, f"mkdir -p {remote_dir}"], check=True)
 
     click.echo("Setting up env vars...")
     # Create or append to .bashrc
@@ -590,7 +597,7 @@ EOF'
 '''
     subprocess.run(cmd, shell=True, check=True)
     
-    connect(name, sync_dir, remote_dir, env_vars)
+    connect(name, sync_dir, remote_dir, env_vars, no_sync)
 
 @cli.command()
 @click.option('--name', default="lambda", help='Name for SSH alias')
@@ -601,7 +608,8 @@ EOF'
 @click.option('--env', '-e', multiple=True, help='Environment variables in KEY=VALUE format')
 @click.option('--env-file', type=click.Path(exists=True),
               help='File containing environment variables (one KEY=VALUE per line)')
-def ssh(name, sync_dir, remote_dir, env, env_file):
+@click.option('--no-sync', is_flag=True, help="Don't sync any directory")
+def ssh(name, sync_dir, remote_dir, env, env_file, no_sync):
     """Connect to a lambda instance (with file sync)"""
     # Collect environment variables from both --env and --env-file
     env_vars = {}
@@ -616,7 +624,7 @@ def ssh(name, sync_dir, remote_dir, env, env_file):
             file_vars = [line.strip() for line in f if line.strip() and not line.startswith('#')]
             env_vars.update(parse_env_vars(file_vars))
 
-    connect(name, sync_dir, remote_dir, env_vars)
+    connect(name, sync_dir, remote_dir, env_vars, no_sync)
 
 @cli.command()
 @click.option('--api-key', envvar='LAMBDA_API_KEY', help='LambdaLabs API key')
