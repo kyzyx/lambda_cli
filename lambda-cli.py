@@ -55,6 +55,42 @@ class LambdaAPI:
             raise Exception(f"Failed to get instance info: {response.text}")
         return response.json()
 
+    def terminate_instance(self, instance_id: str) -> dict:
+        """Terminate a specific instance"""
+        url = f"{self.base_url}/instance-operations/terminate"
+        payload = {
+            "instance_ids": [instance_id]
+        }
+        response = requests.post(url, headers=self.headers, json=payload)
+        if response.status_code != 200:
+            raise Exception(f"Failed to terminate instance: {response.text}")
+        return response.json()
+
+    def list_instances(self) -> dict:
+        """Get all running instances"""
+        url = f"{self.base_url}/instances"
+        response = requests.get(url, headers=self.headers)
+        if response.status_code != 200:
+            raise Exception(f"Failed to get instances: {response.text}")
+        return response.json()
+
+    def get_instance_by_ip(self, ip: str) -> Optional[dict]:
+        """Find instance by its name tag"""
+        instances = self.list_instances()
+        for instance in instances.get("data", {}):
+            if instance.get("ip") == ip:
+                return {"instance_id": instance.get("id"), **instance}
+        return None
+
+    def get_instance_by_name(self, name: str) -> Optional[dict]:
+        """Find instance by its name tag"""
+        instances = self.list_instances()
+        for instance in instances.get("data", {}):
+            if instance.get("name") == name:
+                return {"instance_id": instance.get("id"), **instance}
+        return None
+
+
 def find_available_instance(api: LambdaAPI, desired_type: str) -> Tuple[str, str]:
     """Find an available instance type and region matching the desired specification"""
     instance_types = api.get_instance_types()
@@ -90,6 +126,29 @@ def find_available_instance(api: LambdaAPI, desired_type: str) -> Tuple[str, str
         "Try again later or specify a different instance type."
     )
 
+def read_ssh_config(ssh_name: str) -> Optional[str]:
+    """Get hostname/IP from SSH config for a given host entry"""
+    ssh_config_path = os.path.expanduser("~/.ssh/config")
+    if not os.path.exists(ssh_config_path):
+        return None
+
+    try:
+        with open(ssh_config_path, 'r') as f:
+            lines = f.readlines()
+
+        current_host = None
+        for line in lines:
+            line = line.strip()
+            if line.startswith('Host '):
+                current_host = line.split()[1]
+            elif line.startswith('HostName ') and current_host == ssh_name:
+                return line.split()[1]
+    except Exception as e:
+        click.echo(f"Error reading SSH config: {e}", err=True)
+        return None
+
+    return None
+
 def setup_ssh_config(instance_name, hostname, username="ubuntu"):
     ssh_config_path = os.path.expanduser("~/.ssh/config")
     config_dir = os.path.dirname(ssh_config_path)
@@ -97,15 +156,38 @@ def setup_ssh_config(instance_name, hostname, username="ubuntu"):
     if not os.path.exists(config_dir):
         os.makedirs(config_dir)
     
-    config_entry = f"""
+    new_entry = f"""
 Host {instance_name}
     HostName {hostname}
     User {username}
     IdentityFile ~/.ssh/id_rsa
 """
-    
-    with open(ssh_config_path, "a") as f:
-        f.write(config_entry)
+    # Read existing config
+    if os.path.exists(ssh_config_path):
+        with open(ssh_config_path, 'r') as f:
+            lines = f.readlines()
+        with open(os.path.expanduser("~/.ssh/config.bak"), 'w') as f:
+            f.writelines(lines)
+    else:
+        lines = []
+
+    # Remove existing entry for this host if it exists
+    new_lines = []
+    skip_until_next_host = False
+    for line in lines:
+        if line.strip().startswith('Host '):
+            if line.strip() == f'Host {instance_name}':
+                skip_until_next_host = True
+                continue
+            else:
+                skip_until_next_host = False
+        if not skip_until_next_host:
+            new_lines.append(line)
+
+    # Add the new entry
+    with open(ssh_config_path, 'w') as f:
+        f.writelines(new_lines)
+        f.write(new_entry)
 
 def wait_for_instance(api, instance_id, timeout=300):
     start_time = time.time()
@@ -513,6 +595,88 @@ def list_types(api_key):
 
         if "price_cents_per_hour" in info:
             click.echo(f"  Price: ${info['price_cents_per_hour']/100:.2f}/hour")
+
+@cli.command()
+@click.option('--ssh-name', default="lambda")
+@click.option('--api-key', envvar='LAMBDA_API_KEY', help='LambdaLabs API key')
+@click.option('--force', is_flag=True, help='Do not prompt for confirmation')
+def shutdown(ssh_name, api_key, force):
+    """Shutdown a running instance by name"""
+    if not api_key:
+        click.echo("Please set LAMBDA_API_KEY environment variable or provide --api-key")
+        sys.exit(1)
+
+    api = LambdaAPI(api_key)
+
+    # Find instance by name
+    ip = read_ssh_config(ssh_name)
+    if not ip:
+        click.echo(f"No SSH config entry found for '{ssh_name}'")
+        return
+
+    instance = api.get_instance_by_ip(ip)
+    if not instance:
+        click.echo(f"No running instance found with ip '{ip}'")
+
+        # List available instances
+        instances = api.list_instances()
+        if instances.get("data"):
+            click.echo("\nRunning instances:")
+            for inst in instances["data"]:
+                inst_ip = inst.get("ip", "0.0.0.0")
+                inst_id = inst.get("id", "[Unknown]")
+                click.echo(f"  - {inst_ip} ({inst_id})")
+        else:
+            click.echo("No instances are currently running")
+        return
+
+    # Confirm unless --force is used
+    if not force:
+        if not click.confirm(f"Are you sure you want to terminate instance '{ip}'?"):
+            click.echo("Shutdown cancelled")
+            return
+
+    try:
+        click.echo(f"Shutting down instance '{ip}'...")
+        api.terminate_instance(instance["instance_id"])
+        click.echo("Shutdown successful")
+
+        # Clean up SSH config
+        ssh_config_path = os.path.expanduser("~/.ssh/config")
+        if os.path.exists(ssh_config_path):
+            setup_ssh_config(ssh_name, "deleted-instance", "deleted")  # This will remove the entry
+
+    except Exception as e:
+        click.echo(f"Error during shutdown: {e}", err=True)
+
+@cli.command()
+@click.option('--api-key', envvar='LAMBDA_API_KEY', help='LambdaLabs API key')
+def list_running(api_key):
+    """List all running instances"""
+    if not api_key:
+        click.echo("Please set LAMBDA_API_KEY environment variable or provide --api-key")
+        sys.exit(1)
+
+    api = LambdaAPI(api_key)
+    instances = api.list_instances()
+    
+    if not instances.get("data"):
+        click.echo("No instances are currently running")
+        return
+        
+    click.echo("\nRunning instances:")
+    for instance in instances["data"]:
+        name = instance.get("name", "unnamed")
+        instance_id = instance.get("id", "[unknown]")
+        instance_type = instance.get("instance_type", {}).get("name", "unknown")
+        region = instance.get("region", {}).get("name", "unknown")
+        ip = instance.get("ip", "no-ip")
+        
+        click.echo(f"\n{name}:")
+        click.echo(f"  ID: {instance_id}")
+        click.echo(f"  Type: {instance_type}")
+        click.echo(f"  Region: {region}")
+        click.echo(f"  IP: {ip}")
 
 
 if __name__ == '__main__':
