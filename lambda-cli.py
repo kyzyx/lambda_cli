@@ -576,8 +576,8 @@ def parse_env_vars(env_list: List[str]) -> Dict[str, str]:
             ) from e
     return env_vars
 
-def connect(name, sync_dir, remote_dir, env_vars=None, do_sync=True):
-    if not do_sync:
+def connect(name, sync_dir, remote_dir, env_vars=None, no_sync=True):
+    if no_sync:
         ssh_cmd = ["ssh", name]
         subprocess.run(ssh_cmd)
         return
