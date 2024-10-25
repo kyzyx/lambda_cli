@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import yaml
 import click
 import requests
 import time
@@ -13,6 +14,63 @@ import tempfile
 from typing import List, Dict, Optional, Tuple
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileDeletedEvent, FileMovedEvent
+
+
+class Config:
+    def __init__(self):
+        self.config_dir = os.path.expanduser("~/.config/lambda-cli")
+        self.config_file = os.path.join(self.config_dir, "config.yaml")
+        self.config = self.load_config()
+
+    def load_config(self) -> dict:
+        """Load configuration, performing first-time setup if needed"""
+        if not os.path.exists(self.config_dir):
+            os.makedirs(self.config_dir)
+
+        if not os.path.exists(self.config_file):
+            return self.initial_setup()
+
+        with open(self.config_file, 'r') as f:
+            return yaml.safe_load(f) or {}
+
+    def initial_setup(self) -> dict:
+        """Perform first-time setup and create config file"""
+        click.echo("Welcome to Lambda CLI! Let's set up your configuration.")
+        ssh_keyname = click.prompt(
+            "\nEnter the name of your SSH key on Lambda",
+            type=str
+        )
+
+        config = {
+            'ssh_keyname': ssh_keyname,
+            'defaults': {
+                'instance_name': 'lambda',
+            }
+        }
+
+        self.save_config(config)
+        return config
+
+    def save_config(self, config: dict):
+        """Save configuration to file"""
+        with open(self.config_file, 'w') as f:
+            yaml.safe_dump(config, f)
+
+    def get_ssh_keyname(self) -> str:
+        """Get SSH key path, running setup if not configured"""
+        if 'ssh_keyname' not in self.config:
+            self.config['ssh_keyname'] = click.prompt(
+                "\nEnter the name of your SSH key on Lambda",
+                type=str
+            )
+            self.save_config(self.config)
+
+        return self.config['ssh_keyname']
+
+    def get_default(self, key: str, default: any = None) -> any:
+        """Get a default value from config"""
+        return self.config.get('defaults', {}).get(key, default)
+
 
 class LambdaAPI:
     def __init__(self, api_key):
@@ -31,13 +89,13 @@ class LambdaAPI:
             raise Exception(f"Failed to get instance types: {response.text}")
         return response.json()
 
-    def launch_instance(self, instance_type, region_name=None):
+    def launch_instance(self, instance_type, ssh_keynames, region_name=None):
         url = f"{self.base_url}/instance-operations/launch"
         payload = {
             "instance_type_name": instance_type,
             "region_name": region_name,
             "quantity": 1,
-            "ssh_key_names": ["Edward Macbook Pro"],
+            "ssh_key_names": ssh_keynames,
         }
         if not region_name:
             del payload["region_name"]
@@ -535,7 +593,7 @@ def cli():
 @cli.command()
 @click.option('--instance-type', default="gpu_1x_a100", help='Instance type to launch')
 @click.option('--region', help='Region to launch in (optional)')
-@click.option('--name', default="lambda", help='Name for SSH alias')
+@click.option('--name', help='Name for SSH alias')
 @click.option('--api-key', envvar='LAMBDA_API_KEY', help='LambdaLabs API key')
 @click.option('--sync-dir', help='Directory to sync to remote instance', 
               default='.', type=click.Path(exists=True))
@@ -552,6 +610,10 @@ def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_
         sys.exit(1)
 
     api = LambdaAPI(api_key)
+
+    config = Config()
+    if not name:
+        name = config.get_default('instance_name', 'lambda')
 
     # Collect environment variables from both --env and --env-file
     env_vars = {}
@@ -577,7 +639,7 @@ def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_
         click.echo(f"Selected instance type '{instance_type}' in region '{region}'")
     
     click.echo("Launching instance...")
-    response = api.launch_instance(instance_type, region)
+    response = api.launch_instance(instance_type, [config.get_ssh_keyname()], region)
     if response is None:
         return
     instance_id = response["data"]["instance_ids"][0]
@@ -614,7 +676,7 @@ EOF'
     connect(name, sync_dir, remote_dir, env_vars, no_sync)
 
 @cli.command()
-@click.option('--name', default="lambda", help='Name for SSH alias')
+@click.option('--name', help='Name for SSH alias')
 @click.option('--sync-dir', help='Directory to sync to remote instance', 
               default='.', type=click.Path(exists=True))
 @click.option('--remote-dir', help='Remote directory for syncing',
@@ -625,6 +687,10 @@ EOF'
 @click.option('--no-sync', is_flag=True, help="Don't sync any directory")
 def ssh(name, sync_dir, remote_dir, env, env_file, no_sync):
     """Connect to a lambda instance (with file sync)"""
+    if not name:
+        config = Config()
+        name = config.get_default('instance_name', 'lambda')
+
     # Collect environment variables from both --env and --env-file
     env_vars = {}
 
@@ -675,7 +741,7 @@ def list_types(api_key, show_all):
             click.echo(f"  Price: ${info['price_cents_per_hour']/100:.2f}/hour")
 
 @cli.command()
-@click.option('--ssh-name', default="lambda")
+@click.option('--ssh-name')
 @click.option('--api-key', envvar='LAMBDA_API_KEY', help='LambdaLabs API key')
 @click.option('--force', is_flag=True, help='Do not prompt for confirmation')
 def shutdown(ssh_name, api_key, force):
@@ -685,6 +751,10 @@ def shutdown(ssh_name, api_key, force):
         sys.exit(1)
 
     api = LambdaAPI(api_key)
+
+    if not ssh_name:
+        config = Config()
+        ssh_name = config.get_default('instance_name', 'lambda')
 
     # Find instance by name
     ip = read_ssh_config(ssh_name)
