@@ -1,13 +1,47 @@
 #!/usr/bin/env python3
+"""
+Lambda CLI - A command line tool for managing Lambda Labs instances
+
+Installation:
+    pip install git+https://github.com/yourusername/lambda-cli.git
+
+Or directly run this file - it will install its own dependencies if needed.
+"""
+import sys
+import subprocess
+from pathlib import Path
+
+# Check and install dependencies if needed
+def ensure_dependencies():
+    try:
+        import click
+        import watchdog
+        import yaml
+    except ImportError:
+        print("Installing required dependencies...")
+        subprocess.check_call([
+            sys.executable, "-m", "pip", "install",
+            "click>=8.0.0",
+            "watchdog>=2.1.0",
+            "PyYAML>=5.4.1"
+        ])
+        print("Dependencies installed successfully!")
+
+        # Re-import after installation
+        import click
+        import watchdog
+        import yaml
+
+# Only try to import dependencies after ensuring they're installed
+if __name__ == "__main__":
+    ensure_dependencies()
+
 import yaml
 import click
 import requests
 import time
 import os
 import json
-import sys
-import subprocess
-from pathlib import Path
 import threading
 import re
 import tempfile
