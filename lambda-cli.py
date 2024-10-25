@@ -126,50 +126,54 @@ def find_available_instance(api: LambdaAPI, desired_type: str) -> Tuple[str, str
         "Try again later or specify a different instance type."
     )
 
-def read_ssh_config(ssh_name: str) -> Optional[str]:
-    """Get hostname/IP from SSH config for a given host entry"""
-    ssh_config_path = os.path.expanduser("~/.ssh/config")
-    if not os.path.exists(ssh_config_path):
-        return None
+def setup_ssh_configs():
+    """Set up SSH config directory and Lambda-specific config file"""
+    ssh_dir = os.path.expanduser("~/.ssh")
+    main_config = os.path.join(ssh_dir, "config")
+    lambda_config = os.path.join(ssh_dir, "lambda_config")
 
-    try:
-        with open(ssh_config_path, 'r') as f:
-            lines = f.readlines()
+    # Create .ssh directory if it doesn't exist
+    if not os.path.exists(ssh_dir):
+        os.makedirs(ssh_dir, mode=0o700)
 
-        current_host = None
-        for line in lines:
-            line = line.strip()
-            if line.startswith('Host '):
-                current_host = line.split()[1]
-            elif line.startswith('HostName ') and current_host == ssh_name:
-                return line.split()[1]
-    except Exception as e:
-        click.echo(f"Error reading SSH config: {e}", err=True)
-        return None
+    # Create main config if it doesn't exist
+    if not os.path.exists(main_config):
+        with open(main_config, 'w') as f:
+            f.write("# SSH Config File\n")
+        os.chmod(main_config, 0o600)
 
-    return None
+    # Check if lambda_config is included in main config
+    include_line = f"Include {lambda_config}"
+    with open(main_config, 'r') as f:
+        if include_line not in f.read():
+            # Add include at the beginning of the file
+            with open(main_config, 'r') as f:
+                content = f.read()
+            with open(main_config, 'w') as f:
+                f.write(f"{include_line}\n\n{content}")
+
+    # Create lambda config if it doesn't exist
+    if not os.path.exists(lambda_config):
+        with open(lambda_config, 'w') as f:
+            f.write("# Lambda Labs SSH Config\n")
+        os.chmod(lambda_config, 0o600)
+
+    return lambda_config
 
 def setup_ssh_config(instance_name, hostname, username="ubuntu"):
-    ssh_config_path = os.path.expanduser("~/.ssh/config")
-    config_dir = os.path.dirname(ssh_config_path)
-    
-    if not os.path.exists(config_dir):
-        os.makedirs(config_dir)
-    
+    """Set up SSH config entry in Lambda-specific config file"""
+    lambda_config = setup_ssh_configs()
+
     new_entry = f"""
 Host {instance_name}
     HostName {hostname}
     User {username}
     IdentityFile ~/.ssh/id_rsa
 """
-    # Read existing config
-    if os.path.exists(ssh_config_path):
-        with open(ssh_config_path, 'r') as f:
-            lines = f.readlines()
-        with open(os.path.expanduser("~/.ssh/config.bak"), 'w') as f:
-            f.writelines(lines)
-    else:
-        lines = []
+
+    # Read existing lambda config
+    with open(lambda_config, 'r') as f:
+        lines = f.readlines()
 
     # Remove existing entry for this host if it exists
     new_lines = []
@@ -185,9 +189,59 @@ Host {instance_name}
             new_lines.append(line)
 
     # Add the new entry
-    with open(ssh_config_path, 'w') as f:
+    with open(lambda_config, 'w') as f:
         f.writelines(new_lines)
         f.write(new_entry)
+
+def read_ssh_config(ssh_name: str) -> Optional[str]:
+    """Get hostname/IP from Lambda SSH config for a given host entry"""
+    lambda_config = os.path.join(os.path.expanduser("~/.ssh"), "lambda_config")
+    if not os.path.exists(lambda_config):
+        return None
+
+    try:
+        with open(lambda_config, 'r') as f:
+            lines = f.readlines()
+
+        current_host = None
+        for line in lines:
+            line = line.strip()
+            if line.startswith('Host '):
+                current_host = line.split()[1]
+            elif line.startswith('HostName ') and current_host == ssh_name:
+                return line.split()[1]
+    except Exception as e:
+        click.echo(f"Error reading SSH config: {e}", err=True)
+        return None
+
+    return None
+
+def remove_ssh_config(ssh_name: str):
+    """Remove an entry from Lambda SSH config"""
+    lambda_config = os.path.join(os.path.expanduser("~/.ssh"), "lambda_config")
+    if not os.path.exists(lambda_config):
+        return
+
+    # Read existing config
+    with open(lambda_config, 'r') as f:
+        lines = f.readlines()
+
+    # Remove entry for this host
+    new_lines = []
+    skip_until_next_host = False
+    for line in lines:
+        if line.strip().startswith('Host '):
+            if line.strip() == f'Host {ssh_name}':
+                skip_until_next_host = True
+                continue
+            else:
+                skip_until_next_host = False
+        if not skip_until_next_host:
+            new_lines.append(line)
+
+    # Write back the config without the removed entry
+    with open(lambda_config, 'w') as f:
+        f.writelines(new_lines)
 
 def wait_for_instance(api, instance_id, timeout=300):
     start_time = time.time()
