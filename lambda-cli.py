@@ -642,7 +642,8 @@ def ssh(name, sync_dir, remote_dir, env, env_file, no_sync):
 
 @cli.command()
 @click.option('--api-key', envvar='LAMBDA_API_KEY', help='LambdaLabs API key')
-def list_types(api_key):
+@click.option('--show-all', is_flag=True, help='Show all instance types (including unavailable)')
+def list_types(api_key, show_all):
     """List all available instance types and their current availability"""
     if not api_key:
         click.echo("Please set LAMBDA_API_KEY environment variable or provide --api-key")
@@ -653,21 +654,22 @@ def list_types(api_key):
 
     click.echo("\nAvailable instance types:")
     for itype, info in instance_types["data"].items():
-        click.echo(f"\n{itype}:")
-        click.echo(f"  Specs:")
-        click.echo(f"    RAM: {info['instance_type']['specs']['memory_gib']} GB")
-        click.echo(f"    GPUs: {info['instance_type']['specs'].get('gpus', 0)}")
-        if info.get('gpu_description'):
-            click.echo(f"    GPU Type: {info['instance_type']['gpu_description']}")
+        if show_all or len(info["regions_with_capacity_available"]) > 0:
+            click.echo(f"\n{itype}:")
+            click.echo(f"  Specs:")
+            click.echo(f"    RAM: {info['instance_type']['specs']['memory_gib']} GB")
+            click.echo(f"    GPUs: {info['instance_type']['specs'].get('gpus', 0)}")
+            if info.get('gpu_description'):
+                click.echo(f"    GPU Type: {info['instance_type']['gpu_description']}")
 
-        click.echo("  Availability:")
-        if info["regions_with_capacity_available"]:
-            for region_info in info["regions_with_capacity_available"]:
-                region = region_info['name']
-                status = "✓ Available"
-                click.echo(f"    {region}: {status}")
-        else:
-            click.echo("    No instances currently available in any region")
+            click.echo("  Availability:")
+            if info["regions_with_capacity_available"]:
+                for region_info in info["regions_with_capacity_available"]:
+                    region = region_info['name']
+                    status = "✓ Available"
+                    click.echo(f"    {region}: {status}")
+            else:
+                click.echo("    No instances currently available in any region")
 
         if "price_cents_per_hour" in info:
             click.echo(f"  Price: ${info['price_cents_per_hour']/100:.2f}/hour")
