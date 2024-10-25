@@ -243,12 +243,24 @@ def remove_ssh_config(ssh_name: str):
     with open(lambda_config, 'w') as f:
         f.writelines(new_lines)
 
-def wait_for_instance(api, instance_id, timeout=300):
+def get_instance_ip(api, instance_id, timeout=600):
     start_time = time.time()
     while True:
         if time.time() - start_time > timeout:
             raise Exception("Timeout waiting for instance to be ready")
             
+        instance_info = api.get_instance(instance_id)
+        if "ip" in instance_info["data"] and len(instance_info["data"]["ip"]) > 0:
+            ip = instance_info["data"]["ip"]
+            return ip
+        time.sleep(5)
+
+def wait_for_instance(api, instance_id, timeout=600):
+    start_time = time.time()
+    while True:
+        if time.time() - start_time > timeout:
+            raise Exception("Timeout waiting for instance to be ready")
+
         instance_info = api.get_instance(instance_id)
         status = instance_info["data"]["status"]
         
@@ -557,7 +569,11 @@ def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_
     # If no region specified, find an available instance type and region
     if not region:
         click.echo("Finding available instance...")
-        instance_type, region = find_available_instance(api, instance_type)
+        try:
+            instance_type, region = find_available_instance(api, instance_type)
+        except Exception as e:
+            print(str(e))
+            return
         click.echo(f"Selected instance type '{instance_type}' in region '{region}'")
     
     click.echo("Launching instance...")
@@ -566,15 +582,13 @@ def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_
         return
     instance_id = response["data"]["instance_ids"][0]
     
-    click.echo("Waiting for instance to be ready...")
-    instance_info = wait_for_instance(api, instance_id)
-    
-    ip_address = instance_info["data"]["ip"]
-    click.echo(f"Instance ready! IP: {ip_address}")
-    
     click.echo("Setting up SSH config...")
+    ip_address = get_instance_ip(api, instance_id)
     setup_ssh_config(name, ip_address)
     
+    click.echo("Waiting for instance to be ready...")
+    instance_info = wait_for_instance(api, instance_id)
+
     click.echo("Waiting for SSH to be ready...")
     wait_for_ssh(name)
     
