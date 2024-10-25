@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+import click
+import requests
+import time
+import os
+import json
+import sys
+import subprocess
+from pathlib import Path
+import threading
+import re
+import tempfile
+from typing import List, Dict, Optional, Tuple
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler, FileDeletedEvent, FileMovedEvent
+
+class LambdaAPI:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.base_url = "https://cloud.lambdalabs.com/api/v1"
+        self.headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+
+    def get_instance_types(self) -> dict:
+        """Get all available instance types and their specifications"""
+        url = f"{self.base_url}/instance-types"
+        response = requests.get(url, headers=self.headers)
+        if response.status_code != 200:
+            raise Exception(f"Failed to get instance types: {response.text}")
+        return response.json()
+
+    def launch_instance(self, instance_type, region_name=None):
+        url = f"{self.base_url}/instance-operations/launch"
+        payload = {
+            "instance_type_name": instance_type,
+            "region_name": region_name,
+            "quantity": 1,
+            "ssh_key_names": ["Edward Macbook Pro"],
+        }
+        if not region_name:
+            del payload["region_name"]
+            
+        response = requests.post(url, headers=self.headers, json=payload)
+        if response.status_code != 200:
+            print(f"Failed to launch instance: {response.text}")
+            return None
+        return response.json()
+
+    def get_instance(self, instance_id):
+        url = f"{self.base_url}/instances/{instance_id}"
+        response = requests.get(url, headers=self.headers)
+        if response.status_code != 200:
+            raise Exception(f"Failed to get instance info: {response.text}")
+        return response.json()
+
+def find_available_instance(api: LambdaAPI, desired_type: str) -> Tuple[str, str]:
+    """Find an available instance type and region matching the desired specification"""
+    instance_types = api.get_instance_types()
+    
+    # Find all instance types matching the desired specification
+    matching_types = []
+    for instance_type, info in instance_types["data"].items():
+        if re.match(f"^{desired_type}.*", instance_type):
+            matching_types.append((instance_type, info))
+
+    if not matching_types:
+        click.echo(f"No instance types found matching '{desired_type}'")
+        click.echo("Available instance types:")
+        for itype in instance_types["data"].keys():
+            click.echo(f"  - {itype}")
+        raise click.Abort()
+
+    # Check availability for each matching type
+    for instance_type, info in matching_types:
+        # Find regions with available instances
+        available_regions = [
+            region['name']
+            for region in info["regions_with_capacity_available"]
+        ]
+
+        if available_regions:
+            # For now, just take the first available region
+            # Could be enhanced to consider other factors like pricing
+            return instance_type, available_regions[0]
+
+    raise Exception(
+        f"No available instances found matching '{desired_type}'. "
+        "Try again later or specify a different instance type."
+    )
+
+def setup_ssh_config(instance_name, hostname, username="ubuntu"):
+    ssh_config_path = os.path.expanduser("~/.ssh/config")
+    config_dir = os.path.dirname(ssh_config_path)
+    
+    if not os.path.exists(config_dir):
+        os.makedirs(config_dir)
+    
+    config_entry = f"""
+Host {instance_name}
+    HostName {hostname}
+    User {username}
+    IdentityFile ~/.ssh/id_rsa
+"""
+    
+    with open(ssh_config_path, "a") as f:
+        f.write(config_entry)
+
+def wait_for_instance(api, instance_id, timeout=300):
+    start_time = time.time()
+    while True:
+        if time.time() - start_time > timeout:
+            raise Exception("Timeout waiting for instance to be ready")
+            
+        instance_info = api.get_instance(instance_id)
+        status = instance_info["data"]["status"]
+        
+        if status == "active":
+            return instance_info
+        elif status == "failed":
+            raise Exception("Instance failed to start")
+            
+        click.echo(f"Instance status: {status}")
+        time.sleep(5)
+
+def wait_for_ssh(host, timeout=300):
+    start_time = time.time()
+    while True:
+        if time.time() - start_time > timeout:
+            raise Exception("Timeout waiting for SSH to be ready")
+            
+        result = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no", 
+             host, "echo 'SSH ready'"],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode == 0:
+            return
+            
+        click.echo("Waiting for SSH to be ready...")
+        time.sleep(5)
+
+class SyncEventHandler(FileSystemEventHandler):
+    def __init__(self, src_path: str, host: str, remote_path: str):
+        self.src_path = os.path.abspath(src_path)
+        self.host = host
+        self.remote_path = remote_path
+        self.last_sync = {}  # Track last sync time for each file
+        self.sync_delay = 1.0  # Delay in seconds to prevent rapid successive syncs
+        self._sync_lock = threading.Lock()
+        self._pending_syncs = set()
+        self._pending_deletes = set()
+        self._sync_timer = None
+
+    def on_any_event(self, event):
+        # Ignore directory events and hidden files/directories
+        if event.is_directory or any(p.startswith('.') for p in event.src_path.split(os.sep)):
+            return
+
+        # Ignore certain file patterns
+        if any(pattern in event.src_path for pattern in [
+            '__pycache__',
+            '.DS_Store',
+            '.git/',
+        ]):
+            return
+        if any(event.src_path.endswith(pattern) for pattern in [
+            '.pyc',
+            '.swp'
+            '.swo',
+            '~',
+            '4913',
+            '.env'
+        ]):
+            return
+        try:
+            rel_path = os.path.relpath(event.src_path, self.src_path)
+            with self._sync_lock:
+                if isinstance(event, (FileDeletedEvent, FileMovedEvent)) and \
+                   not os.path.exists(event.src_path):
+                    # If file was deleted or moved away, add to pending deletes
+                    self._pending_deletes.add(rel_path)
+                    # Remove from pending syncs if it was there
+                    self._pending_syncs.discard(rel_path)
+                else:
+                    # For created, modified, or moved-to events
+                    self._pending_syncs.add(rel_path)
+                    # Remove from pending deletes if it was there
+                    self._pending_deletes.discard(rel_path)
+
+                # Reset or start the sync timer
+                if self._sync_timer is not None:
+                    self._sync_timer.cancel()
+                self._sync_timer = threading.Timer(self.sync_delay, self._sync_pending_files)
+                self._sync_timer.start()
+
+        except ValueError as e:
+            click.echo(f"Error processing path {event.src_path}: {e}", err=True)
+
+    def _sync_pending_files(self):
+        """Sync all pending files and handle deletions in a single rsync command"""
+        with self._sync_lock:
+            try:
+                # Handle deleted files
+                if self._pending_deletes:
+                    delete_list_file = None
+                    try:
+                        # Create a temporary file with the list of files to delete
+                        with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
+                            for rel_path in self._pending_deletes:
+                                f.write(f"{rel_path}\n")
+                            delete_list_file = f.name
+
+                        # Use --delete-from to specifically delete these files
+                        cmd = [
+                            "rsync",
+                            "-av",
+                            "--delete",
+                            "--existing",  # only update existing files
+                            "--include-from=" + delete_list_file,
+                            "--exclude=*",  # exclude everything else
+                            #"--ignore-missing-args",
+                            "/dev/null/",  # empty source directory
+                            f"{self.host}:{self.remote_path}/"
+                        ]
+
+                        result = subprocess.run(
+                            cmd,
+                            capture_output=True,
+                            text=True
+                        )
+
+                        if result.returncode not in (0, 23):
+                            click.echo(f"Warning: Delete sync had issues: {result.stderr}", err=True)
+                        else:
+                            num_files = len(self._pending_deletes)
+                            # click.echo(f"Deleted {num_files} file{'s' if num_files != 1 else ''}")
+
+                    finally:
+                        if delete_list_file:
+                            try:
+                                os.unlink(delete_list_file)
+                            except OSError:
+                                pass
+                        self._pending_deletes.clear()
+
+                # Handle file updates
+                if self._pending_syncs:
+                    files_list_file = None
+                    try:
+                        # Create a temporary file with the list of files to sync
+                        with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
+                            for rel_path in self._pending_syncs:
+                                f.write(f"{rel_path}\n")
+                            files_list_file = f.name
+
+                        # Sync all pending files
+                        cmd = [
+                            "rsync",
+                            "-av",
+                            "--progress",
+                            "--delete",  # ensure deletions are propagated
+                            "--files-from=" + files_list_file,
+                            #"--ignore-missing-args",
+                            "--partial",
+                            self.src_path + "/",
+                            f"{self.host}:{self.remote_path}"
+                        ]
+
+                        result = subprocess.run(
+                            cmd,
+                            capture_output=True,
+                            text=True
+                        )
+
+                        if result.returncode not in (0, 23):
+                            click.echo(f"Warning: Sync had issues: {result.stderr}", err=True)
+                        else:
+                            num_files = len(self._pending_syncs)
+                            #click.echo(f"Synced {num_files} file{'s' if num_files != 1 else ''}")
+
+                    finally:
+                        if files_list_file:
+                            try:
+                                os.unlink(files_list_file)
+                            except OSError:
+                                pass
+                        self._pending_syncs.clear()
+
+            except Exception as e:
+                click.echo(f"Error during sync: {e}", err=True)
+
+    def __del__(self):
+        if self._sync_timer is not None:
+            self._sync_timer.cancel()
+
+def start_file_watcher(src_path: str, host: str, remote_path: str) -> Observer:
+    """Start watching for file changes using watchdog"""
+    click.echo("Starting file watcher...")
+    
+    event_handler = SyncEventHandler(src_path, host, remote_path)
+    observer = Observer()
+    observer.schedule(event_handler, src_path, recursive=True)
+    observer.start()
+    return observer
+
+def sync_directory(src_path, host, remote_path):
+    """Perform initial rsync of the directory"""
+    cmd = [
+        "rsync", "-av", "--progress",
+        "--exclude", ".git",
+        "--exclude", "*.pyc",
+        "--exclude", "*.swo",
+        "--exclude", "*.swp",
+        "--exclude", "*~",
+        "--exclude", "__pycache__",
+        "--exclude", "*.DS_Store",
+        "--exclude", ".env",
+        f"{src_path}/",
+        f"{host}:{remote_path}"
+    ]
+    subprocess.run(cmd, check=True)
+
+def setup_environment(host: str, env_vars: Dict[str, str]):
+    """Set up environment variables on the remote instance"""
+
+    # Also set variables for the current session
+    cmd = ["ssh", host]
+    for key, value in env_vars.items():
+        cmd.extend([f'export {key}="{value}";'])
+    cmd.append('bash')
+    
+    return cmd
+
+def parse_env_vars(env_list: List[str]) -> Dict[str, str]:
+    """Parse environment variables from the format KEY=VALUE"""
+    env_vars = {}
+    for env_var in env_list:
+        try:
+            key, value = env_var.split('=', 1)
+            if not key:
+                raise ValueError("Empty key is not allowed")
+            env_vars[key] = value
+        except ValueError as e:
+            raise click.BadParameter(
+                f"Invalid environment variable format: {env_var}. "
+                "Use KEY=VALUE format."
+            ) from e
+    return env_vars
+
+def connect(name, sync_dir, remote_dir, env_vars=None):
+    click.echo("Performing initial file sync...")
+    sync_directory(sync_dir, name, remote_dir)
+    
+    click.echo("Starting file watcher for continuous sync...")
+    observer = start_file_watcher(sync_dir, name, remote_dir)
+    
+    click.echo(f"\nConnecting to instance...")
+    try:
+        # Start SSH session with environment variables
+        if env_vars:
+            ssh_cmd = setup_environment(name, env_vars)
+        else:
+            ssh_cmd = ["ssh", name]
+        subprocess.run(ssh_cmd)
+    except KeyboardInterrupt:
+        click.echo("\nDisconnecting...")
+    finally:
+        # Cleanup
+        click.echo("Stopping file watcher...")
+        observer.stop()
+        observer.join()
+
+@click.group()
+def cli():
+    """CLI wrapper for LambdaLabs API"""
+    pass
+
+@cli.command()
+@click.option('--instance-type', default="gpu_1x_a100", help='Instance type to launch')
+@click.option('--region', help='Region to launch in (optional)')
+@click.option('--name', default="lambda", help='Name for SSH alias')
+@click.option('--api-key', envvar='LAMBDA_API_KEY', help='LambdaLabs API key')
+@click.option('--sync-dir', help='Directory to sync to remote instance', 
+              default='.', type=click.Path(exists=True))
+@click.option('--remote-dir', help='Remote directory for syncing',
+              default='~/')
+@click.option('--env', '-e', multiple=True, help='Environment variables in KEY=VALUE format')
+@click.option('--env-file', type=click.Path(exists=True),
+              help='File containing environment variables (one KEY=VALUE per line)')
+def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_file):
+    """Launch a new instance, configure SSH access, sync files, and connect"""
+    if not api_key:
+        click.echo("Please set LAMBDA_API_KEY environment variable or provide --api-key")
+        sys.exit(1)
+
+    api = LambdaAPI(api_key)
+
+    # Collect environment variables from both --env and --env-file
+    env_vars = {}
+
+    # Parse --env options
+    if env:
+        env_vars.update(parse_env_vars(env))
+
+    # Parse --env-file if provided
+    if env_file:
+        with open(env_file) as f:
+            file_vars = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+            env_vars.update(parse_env_vars(file_vars))
+    
+    # If no region specified, find an available instance type and region
+    if not region:
+        click.echo("Finding available instance...")
+        instance_type, region = find_available_instance(api, instance_type)
+        click.echo(f"Selected instance type '{instance_type}' in region '{region}'")
+    
+    click.echo("Launching instance...")
+    response = api.launch_instance(instance_type, region)
+    if response is None:
+        return
+    instance_id = response["data"]["instance_ids"][0]
+    
+    click.echo("Waiting for instance to be ready...")
+    instance_info = wait_for_instance(api, instance_id)
+    
+    ip_address = instance_info["data"]["ip"]
+    click.echo(f"Instance ready! IP: {ip_address}")
+    
+    click.echo("Setting up SSH config...")
+    setup_ssh_config(name, ip_address)
+    
+    click.echo("Waiting for SSH to be ready...")
+    wait_for_ssh(name)
+    
+    click.echo("Creating remote directory...")
+    subprocess.run(["ssh", name, f"mkdir -p {remote_dir}"], check=True)
+
+    click.echo("Setting up env vars...")
+    # Create or append to .bashrc
+    env_setup = "\n# Environment variables set by lambda-cli\n"
+    for key, value in env_vars.items():
+        # Escape special characters in the value
+        escaped_value = value.replace('"', '\\"')
+        env_setup += f'export {key}="{escaped_value}"\n'
+    
+    # Use heredoc to safely handle special characters
+    cmd = f'''ssh {host} 'cat >> ~/.bashrc << "EOF"
+{env_setup}
+EOF'
+'''
+    subprocess.run(cmd, shell=True, check=True)
+    
+    connect(name, sync_dir, remote_dir, env_vars)
+
+@cli.command()
+@click.option('--name', default="lambda", help='Name for SSH alias')
+@click.option('--sync-dir', help='Directory to sync to remote instance', 
+              default='.', type=click.Path(exists=True))
+@click.option('--remote-dir', help='Remote directory for syncing',
+              default='~/')
+@click.option('--env', '-e', multiple=True, help='Environment variables in KEY=VALUE format')
+@click.option('--env-file', type=click.Path(exists=True),
+              help='File containing environment variables (one KEY=VALUE per line)')
+def ssh(name, sync_dir, remote_dir, env, env_file):
+    """Connect to a lambda instance (with file sync)"""
+    # Collect environment variables from both --env and --env-file
+    env_vars = {}
+
+    # Parse --env options
+    if env:
+        env_vars.update(parse_env_vars(env))
+
+    # Parse --env-file if provided
+    if env_file:
+        with open(env_file) as f:
+            file_vars = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+            env_vars.update(parse_env_vars(file_vars))
+
+    connect(name, sync_dir, remote_dir, env_vars)
+
+@cli.command()
+@click.option('--api-key', envvar='LAMBDA_API_KEY', help='LambdaLabs API key')
+def list_types(api_key):
+    """List all available instance types and their current availability"""
+    if not api_key:
+        click.echo("Please set LAMBDA_API_KEY environment variable or provide --api-key")
+        sys.exit(1)
+
+    api = LambdaAPI(api_key)
+    instance_types = api.get_instance_types()
+
+    click.echo("\nAvailable instance types:")
+    for itype, info in instance_types["data"].items():
+        click.echo(f"\n{itype}:")
+        click.echo(f"  Specs:")
+        click.echo(f"    RAM: {info['instance_type']['specs']['memory_gib']} GB")
+        click.echo(f"    GPUs: {info['instance_type']['specs'].get('gpus', 0)}")
+        if info.get('gpu_description'):
+            click.echo(f"    GPU Type: {info['instance_type']['gpu_description']}")
+
+        click.echo("  Availability:")
+        if info["regions_with_capacity_available"]:
+            for region_info in info["regions_with_capacity_available"]:
+                region = region_info['name']
+                status = "✓ Available"
+                click.echo(f"    {region}: {status}")
+        else:
+            click.echo("    No instances currently available in any region")
+
+        if "price_cents_per_hour" in info:
+            click.echo(f"  Price: ${info['price_cents_per_hour']/100:.2f}/hour")
+
+
+if __name__ == '__main__':
+    cli()
