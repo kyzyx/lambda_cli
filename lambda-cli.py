@@ -532,14 +532,33 @@ def sync_directory(src_path, host, remote_path):
 
 def setup_environment(host: str, env_vars: Dict[str, str]):
     """Set up environment variables on the remote instance"""
+    # Create a file for lambda-specific environment variables
+    env_file = ".lambda_env"
 
-    # Also set variables for the current session
-    cmd = ["ssh", host]
+    # Create content for the environment file
+    env_content = "# Environment variables set by lambda-cli\n"
     for key, value in env_vars.items():
-        cmd.extend([f'export {key}="{value}";'])
-    cmd.append('bash')
-    
-    return cmd
+        # Escape special characters in the value
+        escaped_value = value.replace('"', '\\"')
+        env_content += f'export {key}="{escaped_value}"\n'
+
+    with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
+        temp_file.write(env_content)
+        local_file = temp_file.name
+
+    try:
+        # Upload the file using scp
+        remote_env_file = "~/.lambda_env"
+        subprocess.run(["scp", local_file, f"{host}:{remote_env_file}"], check=True)
+
+        # Add source command to .bashrc if not already present
+        source_line = f'\n# Source lambda environment variables\n[ -f {remote_env_file} ] && source {remote_env_file}\n'
+        check_cmd = f'''ssh {host} 'grep -q "{remote_env_file}" ~/.bashrc || echo "{source_line}" >> ~/.bashrc' '''
+        subprocess.run(check_cmd, shell=True, check=True)
+
+    finally:
+        # Clean up the temporary file
+        os.unlink(local_file)
 
 def parse_env_vars(env_list: List[str]) -> Dict[str, str]:
     """Parse environment variables from the format KEY=VALUE"""
@@ -573,9 +592,8 @@ def connect(name, sync_dir, remote_dir, env_vars=None, do_sync=True):
     try:
         # Start SSH session with environment variables
         if env_vars:
-            ssh_cmd = setup_environment(name, env_vars)
-        else:
-            ssh_cmd = ["ssh", name]
+            setup_environment(name, env_vars)
+        ssh_cmd = ["ssh", name]
         subprocess.run(ssh_cmd)
     except KeyboardInterrupt:
         click.echo("\nDisconnecting...")
@@ -658,21 +676,6 @@ def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_
         click.echo("Creating remote directory...")
         subprocess.run(["ssh", name, f"mkdir -p {remote_dir}"], check=True)
 
-    click.echo("Setting up env vars...")
-    # Create or append to .bashrc
-    env_setup = "\n# Environment variables set by lambda-cli\n"
-    for key, value in env_vars.items():
-        # Escape special characters in the value
-        escaped_value = value.replace('"', '\\"')
-        env_setup += f'export {key}="{escaped_value}"\n'
-    
-    # Use heredoc to safely handle special characters
-    cmd = f'''ssh {host} 'cat >> ~/.bashrc << "EOF"
-{env_setup}
-EOF'
-'''
-    subprocess.run(cmd, shell=True, check=True)
-    
     connect(name, sync_dir, remote_dir, env_vars, no_sync)
 
 @cli.command()
