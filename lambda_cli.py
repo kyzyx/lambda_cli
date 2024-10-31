@@ -74,6 +74,13 @@ class Config:
             "\nEnter the name of your SSH key on Lambda",
             type=str
         )
+        
+        env_file = click.prompt(
+            "\nEnter path to default environment file (optional, press enter to skip)",
+            type=str,
+            default="",
+            show_default=False
+        )
 
         config = {
             'ssh_keyname': ssh_keyname,
@@ -81,6 +88,9 @@ class Config:
                 'instance_name': 'lambda',
             }
         }
+        
+        if env_file:
+            config['env_file'] = env_file
 
         self.save_config(config)
         return config
@@ -104,6 +114,14 @@ class Config:
     def get_default(self, key: str, default: any = None) -> any:
         """Get a default value from config"""
         return self.config.get('defaults', {}).get(key, default)
+
+    def get_env_file(self) -> Optional[str]:
+        """Get the default environment file path from config"""
+        env_file = self.config.get('env_file')
+        if env_file:
+            # Expand ~ to user's home directory
+            return os.path.expanduser(env_file)
+        return None
 
 
 class LambdaAPI:
@@ -674,11 +692,20 @@ def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_
     if env:
         env_vars.update(parse_env_vars(env))
 
-    # Parse --env-file if provided
+    # Parse --env-file if provided, falling back to config if not specified
+    config = Config()
+    if not env_file:
+        env_file = config.get_env_file()
+    
     if env_file:
-        with open(env_file) as f:
-            file_vars = [line.strip() for line in f if line.strip() and not line.startswith('#')]
-            env_vars.update(parse_env_vars(file_vars))
+        try:
+            with open(env_file) as f:
+                file_vars = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+                env_vars.update(parse_env_vars(file_vars))
+        except FileNotFoundError:
+            click.echo(f"Warning: Environment file '{env_file}' not found", err=True)
+        except Exception as e:
+            click.echo(f"Warning: Error reading environment file: {e}", err=True)
     
     # If no region specified, find an available instance type and region
     if not region:
