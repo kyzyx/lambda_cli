@@ -628,12 +628,13 @@ def parse_env_vars(env_list: List[str]) -> Dict[str, str]:
             ) from e
     return env_vars
 
-def connect(name, sync_dir, remote_dir, env_vars=None, no_sync=True, forward_port=None):
+def connect(name, sync_dir, remote_dir, env_vars=None, no_sync=True, forward_ports=None):
     ssh_args = ["ssh"]
     
     # Add port forwarding if specified
-    if forward_port:
-        ssh_args.extend(["-L", f"{forward_port}:localhost:{forward_port}"])
+    if forward_ports:
+        for port in forward_ports:
+            ssh_args.extend(["-L", f"{port}:localhost:{port}"])
     
     ssh_args.append(name)
     
@@ -679,7 +680,7 @@ def cli():
 @click.option('--env-file', type=click.Path(exists=True),
               help='File containing environment variables (one KEY=VALUE per line)')
 @click.option('--no-sync', is_flag=True, help="Don't sync any directory")
-@click.option('--forward', type=int, help='Port to forward from remote to local machine')
+@click.option('--forward', type=int, multiple=True, help='Port(s) to forward from remote to local machine (can be specified multiple times)')
 def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_file, no_sync, forward):
     """Launch a new instance, configure SSH access, sync files, and connect"""
     if not api_key:
@@ -756,7 +757,7 @@ def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_
 @click.option('--env-file', type=click.Path(exists=True),
               help='File containing environment variables (one KEY=VALUE per line)')
 @click.option('--no-sync', is_flag=True, help="Don't sync any directory")
-@click.option('--forward', type=int, help='Port to forward from remote to local machine')
+@click.option('--forward', type=int, multiple=True, help='Port(s) to forward from remote to local machine (can be specified multiple times)')
 def ssh(name, sync_dir, remote_dir, env, env_file, no_sync, forward):
     """Connect to a lambda instance (with file sync)"""
     if not name:
