@@ -86,6 +86,7 @@ class Config:
             'ssh_keyname': ssh_keyname,
             'defaults': {
                 'instance_name': 'lambda',
+                'forward_ports': [],  # Default empty list for port forwarding
             }
         }
         
@@ -745,7 +746,12 @@ def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_
         click.echo("Creating remote directory...")
         subprocess.run(["ssh", name, f"mkdir -p {remote_dir}"], check=True)
 
-    connect(name, sync_dir, remote_dir, env_vars, no_sync, forward)
+    # Combine CLI-specified ports with defaults from config
+    config = Config()
+    default_ports = config.config.get('defaults', {}).get('forward_ports', [])
+    all_ports = list(forward) + default_ports
+
+    connect(name, sync_dir, remote_dir, env_vars, no_sync, all_ports)
 
 @cli.command()
 @click.option('--name', help='Name for SSH alias')
@@ -777,7 +783,12 @@ def ssh(name, sync_dir, remote_dir, env, env_file, no_sync, forward):
             file_vars = [line.strip() for line in f if line.strip() and not line.startswith('#')]
             env_vars.update(parse_env_vars(file_vars))
 
-    connect(name, sync_dir, remote_dir, env_vars, no_sync, forward)
+    # Combine CLI-specified ports with defaults from config
+    config = Config()
+    default_ports = config.config.get('defaults', {}).get('forward_ports', [])
+    all_ports = list(forward) + default_ports if forward else default_ports
+
+    connect(name, sync_dir, remote_dir, env_vars, no_sync, all_ports)
 
 @cli.command()
 @click.option('--api-key', envvar='LAMBDA_API_KEY', help='LambdaLabs API key')
