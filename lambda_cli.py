@@ -210,7 +210,9 @@ def find_available_instance(api: LambdaAPI, desired_type: str) -> Tuple[str, str
     matching_types = []
     for instance_type, info in instance_types["data"].items():
         if re.match(f"^{desired_type}.*", instance_type):
-            matching_types.append((instance_type, info))
+            # Add price info to help sort by cost
+            price = info['instance_type'].get('price_cents_per_hour', float('inf'))
+            matching_types.append((instance_type, info, price))
 
     if not matching_types:
         click.echo(f"No instance types found matching '{desired_type}'")
@@ -219,8 +221,11 @@ def find_available_instance(api: LambdaAPI, desired_type: str) -> Tuple[str, str
             click.echo(f"  - {itype}")
         raise click.Abort()
 
-    # Check availability for each matching type
-    for instance_type, info in matching_types:
+    # Sort by price (cheapest first)
+    matching_types.sort(key=lambda x: x[2])
+
+    # Check availability for each matching type, starting with cheapest
+    for instance_type, info, price in matching_types:
         # Find regions with available instances
         available_regions = [
             region['name']
@@ -228,8 +233,9 @@ def find_available_instance(api: LambdaAPI, desired_type: str) -> Tuple[str, str
         ]
 
         if available_regions:
-            # For now, just take the first available region
-            # Could be enhanced to consider other factors like pricing
+            price_str = f"${price/100:.2f}/hour" if price != float('inf') else "price unknown"
+            click.echo(f"Selected {instance_type} ({price_str})")
+            # Take the first available region
             return instance_type, available_regions[0]
 
     raise Exception(
@@ -821,8 +827,8 @@ def list_types(api_key, show_all):
             else:
                 click.echo("    No instances currently available in any region")
 
-        if "price_cents_per_hour" in info:
-            click.echo(f"  Price: ${info['price_cents_per_hour']/100:.2f}/hour")
+            if "price_cents_per_hour" in info['instance_type']:
+                click.echo(f"  Price: ${info['instance_type']['price_cents_per_hour']/100:.2f}/hour")
 
 @cli.command()
 @click.option('--ssh-name')
