@@ -679,6 +679,7 @@ def cli():
     pass
 
 @cli.command()
+@click.argument('instance_type_arg', required=False)
 @click.option('--instance-type', default="gpu_1x_a100", help='Instance type to launch')
 @click.option('--region', help='Region to launch in (optional)')
 @click.option('--name', help='Name for SSH alias')
@@ -693,7 +694,14 @@ def cli():
 @click.option('--no-sync', is_flag=True, help="Don't sync any directory")
 @click.option('--forward', type=int, multiple=True, help='Port(s) to forward from remote to local machine (can be specified multiple times)')
 @click.option('--file-system', help='File system to mount on instance')
-def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_file, no_sync, forward, file_system):
+def launch(instance_type_arg, instance_type, region, name, api_key, sync_dir, remote_dir, env, env_file, no_sync, forward, file_system):
+    """Launch a new instance, configure SSH access, sync files, and connect
+    
+    INSTANCE_TYPE_ARG: Optional instance type (e.g., gpu_1x_a100)
+    """
+    # Use the positional argument if provided, otherwise use the option
+    if instance_type_arg:
+        instance_type = instance_type_arg
     """Launch a new instance, configure SSH access, sync files, and connect"""
     if not api_key:
         click.echo("Please set LAMBDA_API_KEY environment variable or provide --api-key")
