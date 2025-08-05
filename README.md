@@ -20,7 +20,7 @@ Download `lambda_cli.py` and run it directly - it will install its own dependenc
 
 ### Quick Start
 ```bash
-lambda-cli launch gpu_1x_a100
+lambda-cli launch --instance-type gpu_1x_a100
 ```
 This will launch a new instance (if available), wait for it to boot, and then
 open an ssh session into it. Your local directory will be synced, so just edit
@@ -30,17 +30,17 @@ as you would locally.
 ```bash
 # Start a new instance, wait for it to boot, and ssh into it.
 # By default syncs your current directory to the machine
-lambda-cli launch gpu_1x_a100
+lambda-cli launch --instance-type gpu_1x_a100
 
 # After launching via lambda-cli, you can also directly ssh or scp using 
 # the default 'lambda' name
 scp my_local_file.txt lambda:my_remote_file.txt
 
 # With custom sync directory and ssh name
-lambda-cli launch gpu_1x_a100 --name my-instance --sync-dir ./my-project
+lambda-cli launch --instance-type gpu_1x_a100 --name my-instance --sync-dir ./my-project
 
 # With environment variables
-lambda-cli launch gpu_1x_a100 -e WANDB_API_KEY=abc123 --env-file .env
+lambda-cli launch --instance-type gpu_1x_a100 -e WANDB_API_KEY=abc123 --env-file .env
 ```
 
 ### Reconnect to Running Instance
