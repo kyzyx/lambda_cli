@@ -210,26 +210,52 @@ def find_available_instance(api: LambdaAPI, desired_type: str) -> Tuple[str, str
     """Find an available instance type and region matching the desired specification"""
     instance_types = api.get_instance_types()
     
+    # Special case handling for GPU types
+    if desired_type.lower() in ["a100", "h100", "a10", "a6000"]:
+        # Default to 1x GPU when only the GPU type is specified
+        desired_type = f"gpu_1x_{desired_type.lower()}"
+    
     # Find all instance types matching the desired specification
     matching_types = []
+    exact_matches = []
+    substring_matches = []
+    
     for instance_type, info in instance_types["data"].items():
-        if re.match(f"^{desired_type}.*", instance_type):
-            # Add price info to help sort by cost
-            price = info['instance_type'].get('price_cents_per_hour', float('inf'))
+        # Add price info to help sort by cost
+        price = info['instance_type'].get('price_cents_per_hour', float('inf'))
+        
+        # Check for exact match (case insensitive)
+        if instance_type.lower() == desired_type.lower():
+            exact_matches.append((instance_type, info, price))
+        # Check for prefix match (e.g., "gpu_1x_a100" matches "gpu_1x")
+        elif instance_type.lower().startswith(desired_type.lower()):
             matching_types.append((instance_type, info, price))
-
-    if not matching_types:
+        # Check for substring match (e.g., "gpu_1x_a100" matches "1x_a100")
+        elif desired_type.lower() in instance_type.lower():
+            substring_matches.append((instance_type, info, price))
+    
+    # Prioritize exact matches, then prefix matches, then substring matches
+    all_matches = exact_matches + matching_types + substring_matches
+    
+    if not all_matches:
         click.echo(f"No instance types found matching '{desired_type}'")
         click.echo("Available instance types:")
         for itype in instance_types["data"].keys():
             click.echo(f"  - {itype}")
         raise click.Abort()
+    
+    # If we have multiple matches, show what we found
+    if len(all_matches) > 1:
+        click.echo(f"Found {len(all_matches)} instance types matching '{desired_type}':")
+        for itype, _, price in all_matches:
+            price_str = f"${price/100:.2f}/hour" if price != float('inf') else "price unknown"
+            click.echo(f"  - {itype} ({price_str})")
 
     # Sort by price (cheapest first)
-    matching_types.sort(key=lambda x: x[2])
+    all_matches.sort(key=lambda x: x[2])
 
     # Check availability for each matching type, starting with cheapest
-    for instance_type, info, price in matching_types:
+    for instance_type, info, price in all_matches:
         # Find regions with available instances
         available_regions = [
             region['name']
