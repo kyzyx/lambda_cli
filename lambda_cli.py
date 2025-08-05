@@ -142,16 +142,20 @@ class LambdaAPI:
             raise Exception(f"Failed to get instance types: {response.text}")
         return response.json()
 
-    def launch_instance(self, instance_type, ssh_keynames, region_name=None):
+    def launch_instance(self, instance_type, ssh_keynames, region_name=None, file_system_name=None):
         url = f"{self.base_url}/instance-operations/launch"
         payload = {
             "instance_type_name": instance_type,
             "region_name": region_name,
             "quantity": 1,
             "ssh_key_names": ssh_keynames,
+            "file_system_names": [file_system_name]
         }
         if not region_name:
             del payload["region_name"]
+
+        if not file_system_name:
+            del payload["file_system_names"]
             
         response = requests.post(url, headers=self.headers, json=payload)
         if response.status_code != 200:
@@ -688,7 +692,8 @@ def cli():
               help='File containing environment variables (one KEY=VALUE per line)')
 @click.option('--no-sync', is_flag=True, help="Don't sync any directory")
 @click.option('--forward', type=int, multiple=True, help='Port(s) to forward from remote to local machine (can be specified multiple times)')
-def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_file, no_sync, forward):
+@click.option('--file-system', help='File system to mount on instance')
+def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_file, no_sync, forward, file_system):
     """Launch a new instance, configure SSH access, sync files, and connect"""
     if not api_key:
         click.echo("Please set LAMBDA_API_KEY environment variable or provide --api-key")
@@ -731,9 +736,13 @@ def launch(instance_type, region, name, api_key, sync_dir, remote_dir, env, env_
             print(str(e))
             return
         click.echo(f"Selected instance type '{instance_type}' in region '{region}'")
+
+    file_system_name = None
+    if file_system:
+        file_system_name = file_system
     
     click.echo("Launching instance...")
-    response = api.launch_instance(instance_type, [config.get_ssh_keyname()], region)
+    response = api.launch_instance(instance_type, [config.get_ssh_keyname()], region, file_system_name)
     if response is None:
         return
     instance_id = response["data"]["instance_ids"][0]
